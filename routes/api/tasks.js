@@ -1,93 +1,141 @@
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs'); 
-const User = require('../../models/User');
+const Task = require('../../models/Task'); // Import your Task model
 
+// You imported isAuthenticated in server.js for /api/tasks,
+// so you don't need to define it here or import it directly.
+// The middleware chain in server.js already handles authentication before these routes.
 
-const loggedInUsers = new Set(); 
-const isAuthenticated = (req, res, next) => {
-    
-    if (req.headers['x-user-id'] && loggedInUsers.has(req.headers['x-user-id'])) {
-        req.user = { id: req.headers['x-user-id'] }; // 
-        next();
-    } else {
-        res.status(401).json({ msg: 'Not authorized, no user ID found or not logged in' });
+// @route   GET api/tasks
+// @desc    Get all tasks for the logged-in user
+// @access  Private (handled by isAuthenticated in server.js)
+router.get('/', async (req, res) => {
+    try {
+        // req.user.id is set by the isAuthenticated middleware
+        const tasks = await Task.find({ user: req.user.id }).sort({ createdAt: -1 });
+        res.json(tasks);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
     }
-};
+});
 
-router.post('/register', async (req, res) => {
-    const { username, email, password } = req.body;
+// @route   POST api/tasks
+// @desc    Create a new task
+// @access  Private
+router.post('/', async (req, res) => {
+    const { title, description } = req.body; // 'completed' will default to false in schema
 
     try {
-        
-        let user = await User.findOne({ email });
-        if (user) {
-            return res.status(400).json({ msg: 'User already exists' });
-        }
-
-        user = await User.findOne({ username });
-        if (user) {
-            return res.status(400).json({ msg: 'Username already exists' });
-        }
-
-        user = new User({
-            username,
-            email,
-            password
+        const newTask = new Task({
+            title,
+            description,
+            user: req.user.id // Assign the task to the authenticated user
         });
 
-     
-        const salt = await bcrypt.genSalt(10);
-        user.password = await bcrypt.hash(password, salt);
-
-        await user.save();
-
-      
-        res.status(201).json({ msg: 'User registered successfully!', userId: user.id });
-
+        const task = await newTask.save();
+        res.status(201).json(task);
     } catch (err) {
         console.error(err.message);
         res.status(500).send('Server Error');
     }
 });
 
+// @route   GET api/tasks/:id
+// @desc    Get a single task by ID for the logged-in user
+// @access  Private
+router.get('/:id', async (req, res) => {
+    try {
+        const task = await Task.findById(req.params.id);
 
-router.post('/login', async (req, res) => {
-    const { email, password } = req.body;
+        if (!task) {
+            return res.status(404).json({ msg: 'Task not found' });
+        }
+
+        // Ensure task belongs to the authenticated user
+        if (task.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'User not authorized' });
+        }
+
+        res.json(task);
+    } catch (err) {
+        console.error(err.message);
+        // Check for invalid ObjectId format
+        if (err.kind === 'ObjectId') {
+            return res.status(404).json({ msg: 'Task not found' });
+        }
+        res.status(500).send('Server Error');
+    }
+});
+
+
+// @route   PUT api/tasks/:id
+// @desc    Update a task
+// @access  Private
+router.put('/:id', async (req, res) => {
+    const { title, description, completed } = req.body;
+
+    // Build task object
+    const taskFields = {};
+    if (title) taskFields.title = title;
+    if (description) taskFields.description = description;
+    // The 'completed' field can be explicitly set to false, so check if it's provided
+    if (typeof completed === 'boolean') taskFields.completed = completed;
 
     try {
-      
-        let user = await User.findOne({ email });
-        if (!user) {
-            return res.status(400).json({ msg: 'Invalid Credentials' });
+        let task = await Task.findById(req.params.id);
+
+        if (!task) {
+            return res.status(404).json({ msg: 'Task not found' });
         }
 
-        
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) {
-            return res.status(400).json({ msg: 'Invalid Credentials' });
+        // Ensure task belongs to the authenticated user
+        if (task.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'User not authorized' });
         }
 
-        loggedInUsers.add(user.id);
-        res.json({ msg: 'Logged in successfully!', userId: user.id });
-        
+        task = await Task.findByIdAndUpdate(
+            req.params.id,
+            { $set: taskFields },
+            { new: true } // Return the updated document
+        );
 
+        res.json(task);
     } catch (err) {
         console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(404).json({ msg: 'Task not found' });
+        }
         res.status(500).send('Server Error');
     }
 });
 
-router.get('/dashboard', isAuthenticated, (req, res) => {
-    // Only accessible if isAuthenticated middleware passes
-    res.json({ msg: `Welcome to your dashboard, user ${req.user.id}!` });
+// @route   DELETE api/tasks/:id
+// @desc    Delete a task
+// @access  Private
+router.delete('/:id', async (req, res) => {
+    try {
+        const task = await Task.findById(req.params.id);
+
+        if (!task) {
+            return res.status(404).json({ msg: 'Task not found' });
+        }
+
+        // Ensure task belongs to the authenticated user
+        if (task.user.toString() !== req.user.id) {
+            return res.status(401).json({ msg: 'User not authorized' });
+        }
+
+        await Task.findByIdAndDelete(req.params.id);
+
+        res.json({ msg: 'Task removed' });
+    } catch (err) {
+        console.error(err.message);
+        if (err.kind === 'ObjectId') {
+            return res.status(404).json({ msg: 'Task not found' });
+        }
+        res.status(500).send('Server Error');
+    }
 });
 
-router.post('/logout', isAuthenticated, (req, res) => {
-    // Remove user from the "logged-in" set
-    loggedInUsers.delete(req.user.id);
-    res.json({ msg: 'Logged out successfully!' });
-});
-
-
-module.exports = { router, isAuthenticated }; 
+module.exports = router;
